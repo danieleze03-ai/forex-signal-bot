@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: forex-signal-bot
+    runtime: python
+    repo: https://github.com/danieleze03-ai/forex-signal-bot
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8958090720:AAEyV-pdf-M5Y0HQW9d4Bpd8u-x8kq8xTgw
+      - key: TELEGRAM_CHAT_ID
+        value: 1942139816
+      - key: TWELVE_DATA_API_KEY
+        value: d5b253bdf088484a914d917a37c3af1c
+      - key: FINNHUB_API_KEY
+        value: d8h105hr01qhjpmq4ncgd8h105hr01qhjpmq4nd0
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
