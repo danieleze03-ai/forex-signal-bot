@@ -9,7 +9,8 @@ import os
 # KEYS (hardcoded as you requested)
 # ==============================================
 TELEGRAM_BOT_TOKEN = "8958090720:AAEyV-pdf-M5Y0HQW9d4Bpd8u-x8kq8xTgw"
-TELEGRAM_CHAT_ID = "1942139816"
+# Multiple chat IDs: your personal ID and your channel ID
+TELEGRAM_CHAT_IDS = [1942139816, 1003890885812]   # <-- ADDED BOTH
 TWELVE_DATA_API_KEY = "d5b253bdf088484a914d917a37c3af1c"
 FINNHUB_API_KEY = "d8h105hr01qhjpmq4ncgd8h105hr01qhjpmq4nd0"
 
@@ -30,7 +31,7 @@ PAIRS = [
 ]
 
 # Set to False to respect real London/NY session hours; True forces always active
-TRADING_SESSION_ACTIVE = False   # <-- CHANGED FOR LIVE DEPLOYMENT
+TRADING_SESSION_ACTIVE = False   # <-- FOR LIVE DEPLOYMENT
 
 # ==============================================
 # DATABASE FUNCTIONS
@@ -402,7 +403,7 @@ def analyze_pair_full(pair):
     return {"layers": "All 7 layers passed"}, True, trend
 
 # ==============================================
-# SIGNAL GENERATION (uses structural stop)
+# SIGNAL GENERATION (uses structural stop) – WITH DUPLICATE PREVENTION
 # ==============================================
 def calculate_tp_levels(pair, direction, entry, stop):
     pip_multiplier = {
@@ -420,15 +421,31 @@ def calculate_tp_levels(pair, direction, entry, stop):
     return tp1, tp2
 
 def send_telegram_message(message):
+    """Send message to multiple Telegram chats"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload, timeout=5)
-        print("Telegram message sent.")
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    for chat_id in TELEGRAM_CHAT_IDS:
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        try:
+            requests.post(url, json=payload, timeout=5)
+            print(f"Telegram message sent to {chat_id}")
+        except Exception as e:
+            print(f"Telegram error for {chat_id}: {e}")
 
 def generate_signal(pair, trend, entry_price):
+    # === DUPLICATE PREVENTION: check if there's an active signal for this pair ===
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id FROM signals
+        WHERE pair = ? AND status = 'active'
+    ''', (pair,))
+    active = cursor.fetchone()
+    conn.close()
+    if active:
+        print(f"⏸️ Skipping {pair} – active signal already exists")
+        return False
+    # ============================================================================
+
     direction = "BUY" if trend == "uptrend" else "SELL"
     stop = calculate_structural_stop(pair, direction, entry_price)
     tp1, tp2 = calculate_tp_levels(pair, direction, entry_price, stop)
@@ -452,7 +469,7 @@ def generate_signal(pair, trend, entry_price):
     conn.close()
     # ==========================================
     
-    # Then send Telegram
+    # Then send Telegram to all recipients
     msg = f"""
 🚨 FOREX SIGNAL — HIGH CONFIDENCE
 
