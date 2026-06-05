@@ -10,7 +10,7 @@ import os
 # ==============================================
 TELEGRAM_BOT_TOKEN = "8958090720:AAEyV-pdf-M5Y0HQW9d4Bpd8u-x8kq8xTgw"
 # Multiple chat IDs: your personal ID and your channel ID
-TELEGRAM_CHAT_IDS = [1942139816, 1003890885812]   # <-- ADDED BOTH
+TELEGRAM_CHAT_IDS = [1942139816, -1003890885812]   # <-- ADDED BOTH
 TWELVE_DATA_API_KEY = "d5b253bdf088484a914d917a37c3af1c"
 FINNHUB_API_KEY = "d8h105hr01qhjpmq4ncgd8h105hr01qhjpmq4nd0"
 
