@@ -10,7 +10,7 @@ import os
 # ==============================================
 TELEGRAM_BOT_TOKEN = "8958090720:AAEyV-pdf-M5Y0HQW9d4Bpd8u-x8kq8xTgw"
 # Multiple chat IDs: your personal ID and your channel ID
-TELEGRAM_CHAT_IDS = [1942139816, -1003890885812]   # <-- ADDED BOTH
+TELEGRAM_CHAT_IDS = [1942139816, -1003890885812]
 TWELVE_DATA_API_KEY = "d5b253bdf088484a914d917a37c3af1c"
 FINNHUB_API_KEY = "d8h105hr01qhjpmq4ncgd8h105hr01qhjpmq4nd0"
 
@@ -31,7 +31,15 @@ PAIRS = [
 ]
 
 # Set to False to respect real London/NY session hours; True forces always active
-TRADING_SESSION_ACTIVE = False   # <-- FOR LIVE DEPLOYMENT
+TRADING_SESSION_ACTIVE = False   # FOR LIVE DEPLOYMENT
+
+# ==============================================
+# HELPER: WEEKEND CHECK
+# ==============================================
+def is_weekend():
+    """Return True if today is Saturday or Sunday"""
+    # Monday=0, Sunday=6
+    return datetime.now().weekday() >= 5
 
 # ==============================================
 # DATABASE FUNCTIONS
@@ -140,7 +148,7 @@ def get_latest_candle(pair, timeframe):
     return None
 
 def get_historical_candles(pair, timeframe, limit):
-    """Return list of candles (close, high, low) sorted oldest first"""
+    """Return list of candles sorted oldest first"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -193,13 +201,17 @@ def update_intraday():
             time.sleep(12)
 
 # ==============================================
-# SESSION CHECK
+# SESSION CHECK (WITH WEEKEND PREVENTION)
 # ==============================================
 def is_trading_session():
+    # No trading on weekends
+    if is_weekend():
+        return False
     if TRADING_SESSION_ACTIVE:
         return True
     now_utc = datetime.now(timezone.utc)
     hour_utc = now_utc.hour
+    # London: 06-11 UTC, New York: 12-16 UTC
     return (6 <= hour_utc < 11) or (12 <= hour_utc < 16)
 
 # ==============================================
@@ -244,24 +256,18 @@ def layer2_order_blocks(pair, trend):
     return False, "No valid order block"
 
 # ==============================================
-# LAYER 3 – Market Structure (15M) – IMPROVED with swing points
+# LAYER 3 – Market Structure (15M) – with swing points
 # ==============================================
 def find_swing_points(candles, lookback=3):
-    """
-    candles: list of dicts with 'high', 'low', 'close'
-    returns (last_swing_high, last_swing_low)
-    """
     if len(candles) < lookback * 2 + 1:
         return None, None
     swing_highs = []
     swing_lows = []
     for i in range(lookback, len(candles) - lookback):
-        # Swing high
         is_high = all(candles[i]['high'] >= candles[i-j]['high'] for j in range(1, lookback+1)) and \
                   all(candles[i]['high'] >= candles[i+j]['high'] for j in range(1, lookback+1))
         if is_high:
             swing_highs.append({'index': i, 'price': candles[i]['high']})
-        # Swing low
         is_low = all(candles[i]['low'] <= candles[i-j]['low'] for j in range(1, lookback+1)) and \
                  all(candles[i]['low'] <= candles[i+j]['low'] for j in range(1, lookback+1))
         if is_low:
@@ -274,11 +280,9 @@ def layer3_structure(pair, trend):
     candles = get_historical_candles(pair, "15min", 100)
     if len(candles) < 30:
         return False, "Insufficient 15M data"
-    # Convert to format needed for swing detection
-    swing_candles = [{'high': c['high'], 'low': c['low'], 'close': c['close']} for c in candles]
+    swing_candles = [{'high': c['high'], 'low': c['low']} for c in candles]
     last_swing_high, last_swing_low = find_swing_points(swing_candles, lookback=3)
     current_close = candles[-1]['close']
-    
     if trend == "uptrend" and last_swing_high is not None and current_close > last_swing_high:
         return True, f"Structure break above swing high {last_swing_high:.5f}"
     elif trend == "downtrend" and last_swing_low is not None and current_close < last_swing_low:
@@ -293,10 +297,9 @@ def layer4_session():
     return True, "Session active (checked in main)"
 
 # ==============================================
-# LAYER 5 – Economic Calendar (Finnhub) – IMPLEMENTED
+# LAYER 5 – Economic Calendar (Finnhub)
 # ==============================================
 def layer5_economic(pair):
-    # Map pair to base currency
     curr = pair.split('/')[0]
     if curr == "XAU":
         curr = "USD"
@@ -310,29 +313,26 @@ def layer5_economic(pair):
         for event in data["economicCalendar"]:
             if event.get("impact") == "high" and curr in event.get("currency", ""):
                 event_time = datetime.fromtimestamp(event.get("timestamp", now.timestamp()))
-                if abs((event_time - now).total_seconds()) < 7200:  # 2 hours
+                if abs((event_time - now).total_seconds()) < 7200:
                     return False, f"High impact news: {event.get('event', 'unknown')}"
         return True, "No high impact news within 2h"
     except Exception as e:
         print(f"News check error: {e}")
-        return True, "News check failed, skipping filter"
+        return True, "News check failed"
 
 # ==============================================
-# LAYER 6 – Structural Stop Loss & Risk – IMPROVED
+# LAYER 6 – Structural Stop Loss & Risk
 # ==============================================
 def find_nearest_stop_level(pair, direction, entry_price):
-    """Find nearest swing high (for sell) or swing low (for buy) within last 100 candles on 15M"""
     candles = get_historical_candles(pair, "15min", 100)
     if len(candles) < 30:
         return None
     swing_candles = [{'high': c['high'], 'low': c['low']} for c in candles]
     last_swing_high, last_swing_low = find_swing_points(swing_candles, lookback=3)
-    if direction == "BUY" and last_swing_low is not None:
-        if last_swing_low < entry_price:
-            return last_swing_low
-    elif direction == "SELL" and last_swing_high is not None:
-        if last_swing_high > entry_price:
-            return last_swing_high
+    if direction == "BUY" and last_swing_low is not None and last_swing_low < entry_price:
+        return last_swing_low
+    elif direction == "SELL" and last_swing_high is not None and last_swing_high > entry_price:
+        return last_swing_high
     return None
 
 def calculate_structural_stop(pair, direction, entry_price):
@@ -345,7 +345,6 @@ def calculate_structural_stop(pair, direction, entry_price):
         "EUR/USD": 5, "GBP/USD": 7, "USD/JPY": 8, "USD/CHF": 5,
         "AUD/USD": 6, "USD/CAD": 6, "GBP/JPY": 12, "XAU/USD": 3
     }.get(pair, 5)
-    
     level = find_nearest_stop_level(pair, direction, entry_price)
     if level is not None:
         if direction == "BUY":
@@ -353,7 +352,6 @@ def calculate_structural_stop(pair, direction, entry_price):
         else:
             stop = level + buffer_pips * pip
     else:
-        # Fallback to 20 pips
         if direction == "BUY":
             stop = entry_price - 20 * pip
         else:
@@ -361,49 +359,37 @@ def calculate_structural_stop(pair, direction, entry_price):
     return stop
 
 def layer6_risk(pair, direction, entry, stop_loss):
-    # This function is now integrated into generate_signal via calculate_structural_stop.
-    # Placeholder for any additional risk checks.
     return True, "Risk OK"
 
 # ==============================================
-# LAYER 7 – Sentiment (placeholder, can be upgraded later)
+# LAYER 7 – Sentiment (placeholder)
 # ==============================================
 def layer7_sentiment(pair, direction):
-    # TODO: Integrate free retail sentiment API (e.g., OANDA or FXCM) in the future.
-    # For now, always passes.
     return True, "Sentiment aligned (placeholder)"
 
 # ==============================================
-# MASTER ANALYSIS (runs all 7 layers)
+# MASTER ANALYSIS
 # ==============================================
 def analyze_pair_full(pair):
-    # Layer 1
     ok, msg, trend = layer1_trend(pair)
     if not ok:
         return {"layer1": msg}, False, trend
-    # Layer 2
     ok, msg = layer2_order_blocks(pair, trend)
     if not ok:
         return {"layer2": msg}, False, trend
-    # Layer 3
     ok, msg = layer3_structure(pair, trend)
     if not ok:
         return {"layer3": msg}, False, trend
-    # Layer 4 (always passes – session is handled by main loop)
-    # Layer 5
     ok, msg = layer5_economic(pair)
     if not ok:
         return {"layer5": msg}, False, trend
-    # Layer 6 will be applied in generate_signal with stop calculation
-    # Layer 7
     ok, msg = layer7_sentiment(pair, trend)
     if not ok:
         return {"layer7": msg}, False, trend
-    
     return {"layers": "All 7 layers passed"}, True, trend
 
 # ==============================================
-# SIGNAL GENERATION (uses structural stop) – WITH DUPLICATE PREVENTION
+# SIGNAL GENERATION (with duplicate prevention + cooldown)
 # ==============================================
 def calculate_tp_levels(pair, direction, entry, stop):
     pip_multiplier = {
@@ -421,7 +407,6 @@ def calculate_tp_levels(pair, direction, entry, stop):
     return tp1, tp2
 
 def send_telegram_message(message):
-    """Send message to multiple Telegram chats"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for chat_id in TELEGRAM_CHAT_IDS:
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
@@ -432,19 +417,28 @@ def send_telegram_message(message):
             print(f"Telegram error for {chat_id}: {e}")
 
 def generate_signal(pair, trend, entry_price):
-    # === DUPLICATE PREVENTION: check if there's an active signal for this pair ===
+    # 1) Check for active signal (already in DB)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id FROM signals
-        WHERE pair = ? AND status = 'active'
-    ''', (pair,))
+    cursor.execute('SELECT id FROM signals WHERE pair = ? AND status = "active"', (pair,))
     active = cursor.fetchone()
     conn.close()
     if active:
         print(f"⏸️ Skipping {pair} – active signal already exists")
         return False
-    # ============================================================================
+
+    # 2) Cooldown: no new signal for same pair within 12 hours
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT timestamp FROM signals WHERE pair = ? ORDER BY timestamp DESC LIMIT 1', (pair,))
+    last = cursor.fetchone()
+    conn.close()
+    if last:
+        last_time = datetime.fromtimestamp(last[0])
+        hours_since = (datetime.now() - last_time).total_seconds() / 3600
+        if hours_since < 12:
+            print(f"⏸️ Cooldown for {pair} – last signal {hours_since:.1f} hours ago (<12)")
+            return False
 
     direction = "BUY" if trend == "uptrend" else "SELL"
     stop = calculate_structural_stop(pair, direction, entry_price)
@@ -454,11 +448,12 @@ def generate_signal(pair, trend, entry_price):
     if reward < 1.5 * risk:
         print(f"Signal rejected for {pair}: R/R {reward/risk:.1f} < 1.5")
         return False
+
     confidence = 94
     layers_passed = "7/7"
     session = "London" if datetime.now().hour < 12 else "New York"
-    
-    # ===== LOG TO DATABASE BEFORE TELEGRAM =====
+
+    # Log to DB before sending Telegram
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -467,9 +462,7 @@ def generate_signal(pair, trend, entry_price):
     ''', (pair, direction, entry_price, stop, tp1, tp2, confidence, layers_passed, session, int(datetime.now().timestamp()), "active"))
     conn.commit()
     conn.close()
-    # ==========================================
-    
-    # Then send Telegram to all recipients
+
     msg = f"""
 🚨 FOREX SIGNAL — HIGH CONFIDENCE
 
@@ -527,11 +520,12 @@ def background_worker():
             update_intraday()
             run_analysis()
         else:
-            print(f"[{datetime.now()}] Outside trading hours. Sleeping 5 min...")
+            reason = "weekend" if is_weekend() else "outside trading hours"
+            print(f"[{datetime.now()}] {reason}. Sleeping 5 min...")
         time.sleep(300)
 
 # ==============================================
-# FLASK WEB SERVER (for Render/UptimeRobot)
+# FLASK WEB SERVER
 # ==============================================
 from flask import Flask
 app = Flask(__name__)
@@ -548,13 +542,9 @@ def start_background():
 # MAIN ENTRY
 # ==============================================
 if __name__ == "__main__":
-    print("Starting Forex Signal Bot (final version with reports and tracking)...")
+    print("Starting Forex Signal Bot (with weekend & cooldown fixes)...")
     init_database()
-    # Start the performance tracker (monitors active signals)
     start_performance_tracker()
-    # Start the report scheduler (weekly/monthly summaries)
     start_report_scheduler()
-    # Start the main bot background worker
     start_background()
-    # Run Flask to keep the bot alive on Render
     app.run(host='0.0.0.0', port=5000)
